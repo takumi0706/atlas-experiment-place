@@ -23,7 +23,7 @@ env "ci" {
 // Neon 環境（テスト用）
 env "neon" {
   src = data.external_schema.drizzle.url
-  dev = "docker://postgres/16/dev?search_path=public"
+  dev = "docker://postgres/16/dev"
   url = getenv("NEON_DATABASE_URL")
 }
 
