@@ -7,6 +7,7 @@ export const users = pgTable('users', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
   bio: varchar('bio', { length: 500 }),
+  avatarUrl: varchar('avatar_url', { length: 500 }),
 });
 
 export type User = typeof users.$inferSelect;
