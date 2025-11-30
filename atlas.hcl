@@ -20,6 +20,12 @@ env "ci" {
   url = "postgresql://postgres:postgres@localhost:5432/dev?sslmode=disable"
 }
 
+// Neon 環境（テスト用）
+env "neon" {
+  src = data.external_schema.drizzle.url
+  url = getenv("NEON_DATABASE_URL")
+}
+
 // 本番環境（AWS RDS 用 - サンプル設定）
 // 将来的に使用する場合は IAM 認証を推奨
 // locals {
