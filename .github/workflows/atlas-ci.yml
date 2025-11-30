@@ -13,20 +13,6 @@ jobs:
   schema-check:
     name: Schema Diff Check
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: dev
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -41,10 +27,12 @@ jobs:
 
       - name: Check Schema Diff
         id: diff
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
         run: |
-          # atlas schema apply --dry-run で適用計画を取得
+          # atlas schema apply --dry-run で Neon の現在の状態との差分を取得
           DIFF=$(atlas schema apply \
-            --env ci \
+            --env neon \
             --dry-run 2>&1) || true
 
           # "Schema is synced" の場合は変更なし
