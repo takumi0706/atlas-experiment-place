@@ -9,12 +9,40 @@ permissions:
   pull-requests: write
 
 jobs:
+  # コマンドをパースして適切なジョブを実行
+  parse-command:
+    name: Parse Command
+    if: github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    outputs:
+      command: ${{ steps.parse.outputs.command }}
+      target_commit: ${{ steps.parse.outputs.target_commit }}
+    steps:
+      - name: Parse comment
+        id: parse
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body.trim();
+
+            if (body === '/apply-db') {
+              core.setOutput('command', 'apply');
+            } else if (body.startsWith('/rollback-db')) {
+              core.setOutput('command', 'rollback-preview');
+              // /rollback-db abc123 の形式からコミットハッシュを抽出
+              const parts = body.split(/\s+/);
+              if (parts.length > 1) {
+                core.setOutput('target_commit', parts[1]);
+              }
+            } else if (body === '/confirm-rollback') {
+              core.setOutput('command', 'rollback-apply');
+            }
+
+  # /apply-db: スキーマを適用
   apply-schema:
     name: Apply Schema to Neon
-    # PRコメントで /apply-db が投稿された場合のみ実行
-    if: |
-      github.event.issue.pull_request &&
-      github.event.comment.body == '/apply-db'
+    needs: parse-command
+    if: needs.parse-command.outputs.command == 'apply'
     runs-on: ubuntu-latest
     steps:
       - name: Add reaction to comment
@@ -69,9 +97,11 @@ jobs:
 
       - name: Comment result on PR
         uses: actions/github-script@v7
+        env:
+          APPLY_RESULT: ${{ steps.apply.outputs.result }}
         with:
           script: |
-            const result = `${{ steps.apply.outputs.result }}`;
+            const result = process.env.APPLY_RESULT;
             const success = !result.includes('Error');
             const emoji = success ? '✅' : '❌';
             const status = success ? 'Schema applied successfully!' : 'Schema apply failed';
@@ -86,6 +116,354 @@ jobs:
 
             ---
             *Triggered by /apply-db command*`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+  # /rollback-db: ロールバックのプレビューを表示
+  rollback-preview:
+    name: Rollback Preview
+    needs: parse-command
+    if: needs.parse-command.outputs.command == 'rollback-preview'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add reaction to comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'eyes'
+            });
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 全履歴を取得
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: yarn install
+
+      - uses: ariga/setup-atlas@v0
+
+      - name: Find rollback target
+        id: target
+        env:
+          TARGET_COMMIT: ${{ needs.parse-command.outputs.target_commit }}
+        run: |
+          if [ -n "$TARGET_COMMIT" ]; then
+            # 指定されたコミットを使用
+            COMMIT=$TARGET_COMMIT
+          else
+            # 直前のスキーマ変更コミットを取得
+            COMMIT=$(git log --oneline -2 -- src/db/schema/ | tail -1 | cut -d' ' -f1)
+          fi
+
+          if [ -z "$COMMIT" ]; then
+            echo "error=No previous schema commit found" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # コミット情報を取得
+          COMMIT_DATE=$(git show -s --format=%ci $COMMIT 2>/dev/null | cut -d' ' -f1 || echo "unknown")
+          COMMIT_MSG=$(git show -s --format=%s $COMMIT 2>/dev/null || echo "unknown")
+
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          echo "commit_date=$COMMIT_DATE" >> $GITHUB_OUTPUT
+          echo "commit_msg=$COMMIT_MSG" >> $GITHUB_OUTPUT
+
+      - name: Checkout previous schema
+        if: steps.target.outputs.commit != ''
+        run: |
+          git checkout ${{ steps.target.outputs.commit }} -- src/db/schema/
+
+      - name: Generate rollback preview
+        id: preview
+        if: steps.target.outputs.commit != ''
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          DIFF=$(atlas schema apply \
+            --env neon \
+            --dry-run 2>&1) || true
+
+          echo "diff<<EOF" >> $GITHUB_OUTPUT
+          echo "$DIFF" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Comment rollback preview
+        uses: actions/github-script@v7
+        env:
+          TARGET_COMMIT: ${{ steps.target.outputs.commit }}
+          COMMIT_DATE: ${{ steps.target.outputs.commit_date }}
+          COMMIT_MSG: ${{ steps.target.outputs.commit_msg }}
+          PREVIEW_DIFF: ${{ steps.preview.outputs.diff }}
+          TARGET_ERROR: ${{ steps.target.outputs.error }}
+        with:
+          script: |
+            const commit = process.env.TARGET_COMMIT;
+            const commitDate = process.env.COMMIT_DATE;
+            const commitMsg = process.env.COMMIT_MSG;
+            const diff = process.env.PREVIEW_DIFF || '';
+            const error = process.env.TARGET_ERROR;
+
+            if (error) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `## ❌ Rollback Error\n\n${error}`
+              });
+              return;
+            }
+
+            // SQL文を抽出
+            const sqlStatements = [];
+            const lines = diff.split('\n');
+            let currentSql = '';
+            let inSql = false;
+
+            for (const line of lines) {
+              if (line.trim().startsWith('->')) {
+                inSql = true;
+                currentSql = line.trim().substring(2).trim();
+              } else if (inSql) {
+                if (line.trim().startsWith('--') || line.trim() === '' || line.includes('---')) {
+                  if (currentSql) {
+                    sqlStatements.push(currentSql.trim().replace(/;$/, ''));
+                    currentSql = '';
+                  }
+                  inSql = false;
+                } else {
+                  currentSql += '\n' + line;
+                }
+              }
+            }
+            if (currentSql) sqlStatements.push(currentSql.trim().replace(/;$/, ''));
+
+            const uniqueSql = [...new Set(sqlStatements)];
+
+            // テーブル情報を抽出
+            const changes = [];
+            for (const sql of uniqueSql) {
+              if (sql.includes('ALTER TABLE')) {
+                const tableMatch = sql.match(/ALTER TABLE "public"\."(\w+)"/);
+                const table = tableMatch ? tableMatch[1] : 'unknown';
+                if (sql.includes('ADD COLUMN')) {
+                  const colMatch = sql.match(/ADD COLUMN "(\w+)" ([^\s]+)/);
+                  changes.push({ table, op: 'ADD COLUMN', detail: colMatch ? `${colMatch[1]} (${colMatch[2]})` : '' });
+                } else if (sql.includes('DROP COLUMN')) {
+                  const colMatch = sql.match(/DROP COLUMN "(\w+)"/);
+                  changes.push({ table, op: 'DROP COLUMN', detail: colMatch ? colMatch[1] : '' });
+                } else {
+                  changes.push({ table, op: 'ALTER', detail: '' });
+                }
+              } else if (sql.includes('CREATE TABLE')) {
+                const tableMatch = sql.match(/CREATE TABLE "public"\."(\w+)"/);
+                changes.push({ table: tableMatch ? tableMatch[1] : 'unknown', op: 'CREATE TABLE', detail: '' });
+              } else if (sql.includes('DROP TABLE')) {
+                const tableMatch = sql.match(/DROP TABLE "public"\."(\w+)"/);
+                changes.push({ table: tableMatch ? tableMatch[1] : 'unknown', op: 'DROP TABLE', detail: '' });
+              }
+            }
+
+            let tableRows = changes.map(c => `| ${c.table} | ${c.op} | ${c.detail} |`).join('\n');
+
+            // 変更なしの場合
+            if (diff.includes('Schema is synced') || uniqueSql.length === 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `## 🔄 Atlas Schema Rollback Preview\n\n✅ **変更なし** - スキーマは既にロールバック先と同じ状態です\n\n---\n*Triggered by /rollback-db command*`
+              });
+              return;
+            }
+
+            if (!tableRows) tableRows = '| - | - | - |';
+
+            const body = `## 🔄 Atlas Schema Rollback Preview
+
+            📊 **ロールバック先**: \`${commit}\` (${commitDate})
+            📝 **コミット**: ${commitMsg}
+
+            | テーブル | 操作 | 内容 |
+            |---------|------|------|
+            ${tableRows}
+
+            <details>
+            <summary>📝 SQL 詳細</summary>
+
+            \`\`\`sql
+            ${uniqueSql.map(s => s + ';').join('\n\n')}
+            \`\`\`
+
+            </details>
+
+            ---
+            ⚠️ **確認後、\`/confirm-rollback\` でロールバックを適用してください**
+
+            *Triggered by /rollback-db command*`;
+
+            // ロールバック情報を保存（PRの説明を更新）
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            // 既存のpending rollback情報を削除して新しいものを追加
+            let newBody = pr.body || '';
+            newBody = newBody.replace(/<!-- PENDING_ROLLBACK:.*? -->/g, '');
+            newBody += `\n<!-- PENDING_ROLLBACK:${commit} -->`;
+
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              body: newBody
+            });
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+  # /confirm-rollback: ロールバックを実行
+  rollback-apply:
+    name: Apply Rollback
+    needs: parse-command
+    if: needs.parse-command.outputs.command == 'rollback-apply'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add reaction to comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            });
+
+      - name: Get pending rollback commit
+        id: pending
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            const match = (pr.body || '').match(/<!-- PENDING_ROLLBACK:(\w+) -->/);
+            if (match) {
+              core.setOutput('commit', match[1]);
+            } else {
+              core.setOutput('error', 'No pending rollback found. Run /rollback-db first.');
+            }
+
+      - name: Check for pending rollback
+        if: steps.pending.outputs.error != ''
+        uses: actions/github-script@v7
+        env:
+          ERROR_MSG: ${{ steps.pending.outputs.error }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `## ❌ Rollback Error\n\n${process.env.ERROR_MSG}`
+            });
+
+      - uses: actions/checkout@v4
+        if: steps.pending.outputs.commit != ''
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        if: steps.pending.outputs.commit != ''
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        if: steps.pending.outputs.commit != ''
+        run: yarn install
+
+      - uses: ariga/setup-atlas@v0
+        if: steps.pending.outputs.commit != ''
+
+      - name: Checkout and apply rollback
+        id: apply
+        if: steps.pending.outputs.commit != ''
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          TARGET_COMMIT: ${{ steps.pending.outputs.commit }}
+        run: |
+          git checkout $TARGET_COMMIT -- src/db/schema/
+
+          RESULT=$(atlas schema apply \
+            --env neon \
+            --auto-approve 2>&1) || true
+
+          echo "result<<EOF" >> $GITHUB_OUTPUT
+          echo "$RESULT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Comment rollback result
+        if: steps.pending.outputs.commit != ''
+        uses: actions/github-script@v7
+        env:
+          APPLY_RESULT: ${{ steps.apply.outputs.result }}
+          TARGET_COMMIT: ${{ steps.pending.outputs.commit }}
+        with:
+          script: |
+            const result = process.env.APPLY_RESULT;
+            const commit = process.env.TARGET_COMMIT;
+            const success = !result.includes('Error');
+            const emoji = success ? '✅' : '❌';
+            const status = success ? 'Rollback applied successfully!' : 'Rollback failed';
+
+            const body = `## ${emoji} Atlas Schema Rollback
+
+            **Status**: ${status}
+            **Rolled back to**: \`${commit}\`
+
+            \`\`\`
+            ${result}
+            \`\`\`
+
+            ---
+            *Triggered by /confirm-rollback command*`;
+
+            // Pending rollbackを削除
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+
+            let newBody = (pr.body || '').replace(/<!-- PENDING_ROLLBACK:.*? -->/g, '');
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              body: newBody.trim()
+            });
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
