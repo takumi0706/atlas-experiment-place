@@ -41,15 +41,14 @@ jobs:
 
       - name: Check Schema Diff
         id: diff
-        env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dev?sslmode=disable
         run: |
-          # Atlas の external_schema が yarn drizzle-kit export を実行
-          DIFF=$(atlas schema diff \
+          # atlas schema apply --dry-run で適用計画を取得
+          DIFF=$(atlas schema apply \
             --env ci \
-            --format '{{ sql . "  " }}' 2>&1) || true
+            --dry-run 2>&1) || true
 
-          if [ -z "$DIFF" ] || echo "$DIFF" | grep -q "Schemas are synced"; then
+          # "Schema is synced" の場合は変更なし
+          if echo "$DIFF" | grep -q "Schema is synced"; then
             DIFF="No schema changes detected."
           fi
 
