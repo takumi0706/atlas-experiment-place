@@ -1,0 +1,53 @@
+# Atlas CD - AWS RDS への適用（サンプル）
+# 使用する場合は .example を削除してください
+#
+# 必要な設定:
+# 1. AWS_ROLE_ARN: GitHub Actions OIDC 用の IAM ロール ARN
+# 2. atlas.hcl に production 環境を設定
+# 3. RDS で IAM 認証を有効化し、atlas ユーザーを作成
+
+name: Atlas CD
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/db/schema/**'
+
+jobs:
+  deploy:
+    name: Deploy Schema to RDS
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: yarn install
+
+      # AWS 認証（OIDC）
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-northeast-1
+
+      - uses: ariga/setup-atlas@v0
+
+      # スキーマ適用（dry-run で確認）
+      - name: Preview Schema Changes
+        run: |
+          atlas schema apply \
+            --env production \
+            --dry-run
+
+      # スキーマ適用
+      - name: Apply Schema
+        run: |
+          atlas schema apply \
+            --env production \
+            --auto-approve

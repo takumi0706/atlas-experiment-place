@@ -1,0 +1,60 @@
+# Atlas Rollback - 手動実行でスキーマをロールバック（サンプル）
+# 使用する場合は .example を削除してください
+#
+# 必要な設定:
+# 1. DATABASE_URL: 本番データベースの接続 URL
+#
+# 注意事項:
+# - ロールバックは破壊的な操作になる可能性があります
+# - 必ず dry_run: true で事前確認してから実行してください
+# - データマイグレーション（INSERT/UPDATE/DELETE）は自動推論できないため
+#   手動で down.sql を定義する必要があります
+
+name: Atlas Rollback
+on:
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: '戻すバージョン（例: 20240101120000）'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run（実行前確認のみ）'
+        type: boolean
+        default: true
+
+jobs:
+  rollback:
+    name: Rollback Schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ariga/setup-atlas@v0
+
+      - name: Rollback Preview
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "=== Rollback Preview (Dry Run) ==="
+          echo "Target Version: ${{ inputs.target_version }}"
+          atlas migrate down \
+            --to-version ${{ inputs.target_version }} \
+            --url "${{ secrets.DATABASE_URL }}" \
+            --dev-url "docker://postgres/16/dev" \
+            --dry-run
+
+      - name: Execute Rollback
+        if: ${{ !inputs.dry_run }}
+        run: |
+          echo "=== Executing Rollback ==="
+          echo "Target Version: ${{ inputs.target_version }}"
+          atlas migrate down \
+            --to-version ${{ inputs.target_version }} \
+            --url "${{ secrets.DATABASE_URL }}" \
+            --dev-url "docker://postgres/16/dev"
+
+      - name: Rollback Complete
+        if: ${{ !inputs.dry_run }}
+        run: |
+          echo "Rollback completed successfully!"
+          echo "Current schema version: ${{ inputs.target_version }}"

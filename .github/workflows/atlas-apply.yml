@@ -1,0 +1,95 @@
+name: Atlas Apply
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  apply-schema:
+    name: Apply Schema to Neon
+    # PRコメントで /apply-db が投稿された場合のみ実行
+    if: |
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/apply-db'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add reaction to comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            });
+
+      - name: Get PR branch
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('ref', pr.head.ref);
+            core.setOutput('sha', pr.head.sha);
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: yarn install
+
+      - uses: ariga/setup-atlas@v0
+
+      - name: Apply Schema
+        id: apply
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          RESULT=$(atlas schema apply \
+            --env neon \
+            --auto-approve 2>&1) || true
+
+          echo "result<<EOF" >> $GITHUB_OUTPUT
+          echo "$RESULT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Comment result on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const result = `${{ steps.apply.outputs.result }}`;
+            const success = !result.includes('Error');
+            const emoji = success ? '✅' : '❌';
+            const status = success ? 'Schema applied successfully!' : 'Schema apply failed';
+
+            const body = `## ${emoji} Atlas Schema Apply
+
+            **Status**: ${status}
+
+            \`\`\`
+            ${result}
+            \`\`\`
+
+            ---
+            *Triggered by /apply-db command*`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
