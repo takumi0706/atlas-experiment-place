@@ -142,8 +142,22 @@ jobs:
               content: 'eyes'
             });
 
+      - name: Get PR branch
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('ref', pr.head.ref);
+            core.setOutput('sha', pr.head.sha);
+
       - uses: actions/checkout@v4
         with:
+          ref: ${{ steps.pr.outputs.ref }}
           fetch-depth: 0  # 全履歴を取得
 
       - uses: actions/setup-node@v4
@@ -390,9 +404,23 @@ jobs:
               body: `## ❌ Rollback Error\n\n${process.env.ERROR_MSG}`
             });
 
+      - name: Get PR branch
+        id: pr
+        if: steps.pending.outputs.commit != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            core.setOutput('ref', pr.head.ref);
+
       - uses: actions/checkout@v4
         if: steps.pending.outputs.commit != ''
         with:
+          ref: ${{ steps.pr.outputs.ref }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
