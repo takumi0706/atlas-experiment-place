@@ -7,6 +7,8 @@ export const users = pgTable('users', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
   bio: varchar('bio', { length: 500 }),
+  // ロールバックテスト用の新規カラム
+  website: varchar('website', { length: 255 }),
 });
 
 export type User = typeof users.$inferSelect;
