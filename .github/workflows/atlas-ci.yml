@@ -39,19 +39,17 @@ jobs:
 
       - uses: ariga/setup-atlas@v0
 
-      - name: Export Drizzle Schema
-        run: yarn drizzle:export > /tmp/desired-schema.sql
-
       - name: Check Schema Diff
         id: diff
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dev?sslmode=disable
         run: |
+          # Atlas の external_schema が yarn drizzle-kit export を実行
           DIFF=$(atlas schema diff \
-            --from "postgres://postgres:postgres@localhost:5432/dev?sslmode=disable" \
-            --to "file:///tmp/desired-schema.sql" \
-            --dev-url "postgres://postgres:postgres@localhost:5432/dev?sslmode=disable" \
+            --env ci \
             --format '{{ sql . "  " }}' 2>&1) || true
 
-          if [ -z "$DIFF" ]; then
+          if [ -z "$DIFF" ] || echo "$DIFF" | grep -q "Schemas are synced"; then
             DIFF="No schema changes detected."
           fi
 
